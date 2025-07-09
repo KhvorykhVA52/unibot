@@ -1,4 +1,5 @@
 import telebot
+import math
 from telebot import types
 from config import TOKEN
 from database import *
@@ -8,28 +9,22 @@ init_db()
 
 faculties = {
     "ВШЦТ": {
-        "Информационная безопасность компьютерных систем и сетей": ["ИБКСб 24-1", "ИБКСб 23-1"],
-        "Автоматизированные системы обработки информации и управления": ["АСОиУБ-24-1", "АСОиУБ-23-1"]
+        "Информационная безопасность компьютерных систем и сетей": ["ИБКС-24-1", "ИБКС-23"],
+        "Автоматизированные системы обработки информации и управления": ["АСОиУБ-24-1", "АСОиУБ-23"]
     },
     "Нефтегазовые дело": {
         "Автоматизация технологических процессов и производств в нефтяной и газовой промышленности": ["АТП-21", "ЭЭ-22"],
         "Нефтегазовое дело": ["НДБ-24", "НДБ-23"]
-    },
-    "ИТ": {
-        "Моделирование механических систем и процессов": ["ММСП-24", "ММСП-23"],
-    },
-    "ИПТИ": {
-        " Приборы, методы контроля качества и диагностики"  : ["ПККД-24", "ПККД-23"],
-    },
-    "СТРОИН" : {
-        "Промышленное и гражданское строительство": ["ПГС-24", "ПГС-23"],
-    },
+    }
 }
 
 ADMIN_IDS = [
     "1592890429", "1116477607", "6499953001",
     "564380150", "1025247272", "843344460"
 ]
+
+import threading
+import time
 
 bot = telebot.TeleBot(TOKEN)
 
@@ -45,7 +40,7 @@ def start(message):
     for fac in faculties.keys():
         markup.add(types.KeyboardButton(fac))
 
-    msg = bot.send_message(message.chat.id, "Привет👋, Выбери факультет:", reply_markup=markup)
+    msg = bot.send_message(message.chat.id, "🏛 Выбери факультет:", reply_markup=markup)
     bot.register_next_step_handler(msg, select_faculty)
 
 def select_faculty(message):
@@ -80,16 +75,41 @@ def select_group(message, faculty, specialty):
         bot.send_message(message.chat.id, "❗ Неверная группа. Попробуй снова: /start")
         return
 
-    msg = bot.send_message(message.chat.id, "✍️ Введи своё ФИО:")
-    bot.register_next_step_handler(msg, finish_registration, faculty, specialty, group_name)
+    # Получаем список студентов из базы
+    student_names = get_students_by_group(faculty, specialty, group_name)
+    if not student_names:
+        bot.send_message(message.chat.id, "⚠️ В этой группе пока нет студентов в базе. Обратись к администратору.")
+        return
 
-def finish_registration(message, faculty, specialty, group_name):
+    # Отправляем список ФИО для выбора
+    markup = types.ReplyKeyboardMarkup(resize_keyboard=True)
+    for name in student_names:
+        markup.add(types.KeyboardButton(name))
+
+    msg = bot.send_message(message.chat.id, "👤 Выбери своё ФИО из списка:", reply_markup=markup)
+    bot.register_next_step_handler(msg, assign_identity, faculty, specialty, group_name)
+
+def assign_identity(message, faculty, specialty, group_name):
     user_id = str(message.chat.id)
     name = message.text.strip()
-    add_student(user_id, name, faculty, specialty, group_name)
-    bot.send_message(message.chat.id, f"✅ Добро пожаловать, {name}!\nТы зарегистрирован.")
-    bot.send_message(message.chat.id, "Теперь можешь использовать команду /menu для работы с ботом.")
+    assign_user_id_to_student(user_id, name, faculty, specialty, group_name)
 
+    bot.send_message(message.chat.id, f"""✅ Добро пожаловать, {name}!
+Ты зарегистрирован.""")
+
+
+    commands_text = """
+📌 Теперь ты можешь использовать команды:
+
+/menu — открыть главное меню
+/status — посмотреть успеваемость
+/grades — список оценок
+/add_grade — добавить или изменить оценку
+/set_debts — указать количество долгов
+/card — карточка студента
+/admin — список всех студентов (только для админов)
+"""
+    bot.send_message(message.chat.id, commands_text)
 
 @bot.message_handler(commands=['status'])
 def status(message):
@@ -140,24 +160,49 @@ def grades(message):
 
 @bot.message_handler(commands=['add_grade'])
 def add_grade(message):
-    msg = bot.send_message(message.chat.id, "✍️ Введи предмет и баллы через запятую:")
+    msg = bot.send_message(message.chat.id, "✍️ Введи предмет и баллы через запятую:\nНапример: Физика, 85")
     bot.register_next_step_handler(msg, save_grade)
 
 def save_grade(message):
     try:
         user_id = str(message.chat.id)
         student = get_student(user_id)
+
         if not student:
             bot.send_message(message.chat.id, "❗ Ты не зарегистрирован.")
             return
 
-        subject, score = message.text.split(",")
+        text = message.text.strip()
+
+        # Пример: "Физика, 78. Алгебра, 99. История, 85"
+        items = text.split(".")
+        updates = {}
+
+        for item in items:
+            if "," not in item:
+                continue
+            subject, score = item.split(",", 1)
+            subject = subject.strip()
+            score = int(score.strip())
+            updates[subject] = score
+
+        if not updates:
+            raise ValueError("Нет валидных предметов")
+
         grades = student["grades"]
-        grades[subject.strip()] = int(score.strip())
+        grades.update(updates)
         update_grades(user_id, grades)
-        bot.send_message(message.chat.id, f"✅ Оценка по '{subject.strip()}' обновлена.")
-    except:
-        bot.send_message(message.chat.id, "⚠️ Ошибка! Формат: Предмет, Баллы")
+
+        # Формируем ответ
+        result = "\n".join([f"{subj}: {score} баллов" for subj, score in updates.items()])
+        bot.send_message(message.chat.id, f"✅ Добавлены/обновлены оценки:\n{result}")
+
+    except Exception as e:
+        bot.send_message(message.chat.id, "⚠️ Ошибка! Формат: Физика, 78. Алгебра, 99.")
+        print(f"[DEBUG] Ошибка в save_grade: {e}")
+
+
+
 
 @bot.message_handler(commands=['set_debts'])
 def set_debts(message):
@@ -259,14 +304,118 @@ def handle_inline_buttons(call):
     elif call.data == "card":
         card(call.message)
 
-@bot.message_handler(commands=['delete_me'])
-def delete_me(message):
-    import sqlite3
+def check_for_grade_updates():
+    while True:
+        try:
+            students = get_all_students()
+            for student in students:
+                user_id = student['id']
+                if not user_id:
+                    continue
+
+                current_grades = student["grades"]
+                last_grades = student.get("last_grades", {}) or {}
+
+                if not last_grades:
+                    update_last_grades(user_id, current_grades)
+                    continue
+
+                updates = []
+                for subject, new_score in current_grades.items():
+                    old_score = last_grades.get(subject)
+                    if old_score is not None and new_score != old_score:
+                        updates.append(f"{subject}: было {old_score} → стало {new_score}")
+
+                print(f"[DEBUG] {student['name']} — сравниваем оценки:")
+                print(f"grades      : {current_grades}")
+                print(f"last_grades : {last_grades}")
+
+                if updates:
+                    message = "📢 Обновление оценок:\n" + "\n".join(updates)
+                    try:
+                        bot.send_message(user_id, message)
+                        print(f"[OK] Уведомление отправлено студенту ID {user_id}.")
+                    except Exception as e:
+                        print(f"[ERROR] Не удалось отправить сообщение студенту ID {user_id}: {e}")
+                    update_last_grades(user_id, current_grades)
+
+        except Exception as e:
+            print(f"[ERROR] В потоке обновления оценок: {e}")
+
+        time.sleep(60)
+
+threading.Thread(target=check_for_grade_updates, daemon=True).start()
+
+@bot.message_handler(commands=['status'])
+def status(message):
     user_id = str(message.chat.id)
-    conn = sqlite3.connect("students.db")
-    cursor = conn.cursor()
-    cursor.execute("DELETE FROM students WHERE id = ?", (user_id,))
-    conn.commit()
-    conn.close()
-    bot.send_message(message.chat.id, "🗑 Ты удалён из базы. Напиши /start чтобы зарегистрироваться заново.")
+    print(f"[DEBUG] Обработчик /status: user_id = {user_id}")
+
+    student = get_student(user_id)
+    if not student:
+        bot.send_message(message.chat.id, "❗ Ты не зарегистрирован. Напиши /start.")
+        return
+
+    name = student["name"]
+    grades = student["grades"]
+    debts = student["debts"]
+    avg = round(sum(grades.values()) / len(grades), 2) if grades else 0.0
+    risk = min(100, debts * 25)
+    grades_text = "\n".join([f"{subj}: {score} баллов" for subj, score in grades.items()]) or "Нет оценок"
+
+    # прогноз оценки
+    if avg >= 90:
+        prediction = "Отлично (5)"
+    elif avg >= 75:
+        prediction = "Хорошо (4)"
+    elif avg >= 60:
+        prediction = "Удовлетворительно (3)"
+    else:
+        prediction = "Неуд (2) — риск отчисления высок"
+
+    # критические предметы
+    critical_subjects = [f"❗ {subj}: {score} баллов" for subj, score in grades.items() if score < 60]
+    critical_text = "\n".join(critical_subjects) or "Нет критических предметов"
+
+    # прогресс-бар (цель — 85 баллов)
+    goal = 85
+    filled = math.floor(avg / goal * 5)
+    bar = "▰" * filled + "▱" * (5 - filled)
+    progress_line = f"🔄 Прогресс к цели: {bar} {avg} / {goal}"
+
+    text = f"""👤 {name}
+🏛 Факультет: {student["faculty"]}
+📘 Специальность: {student["specialty"]}
+🧑‍🎓 Группа: {student["group"]}
+
+📊 Моя Успеваемость
+   ├─ Текущие баллы
+{grades_text}
+   ├─ Прогноз итоговой оценки: {prediction}
+   ├─ Критические предметы:
+{critical_text}
+   └─ {progress_line}
+
+📈 Средний балл: {avg}
+❗ Долги: {debts}
+🔥 Риск отчисления: {risk}%
+"""
+    bot.send_message(message.chat.id, text)
+
+@bot.message_handler(commands=['achievements'])
+def achievements(message):
+    user_id = str(message.chat.id)
+    student = get_student(user_id)
+    if not student:
+        bot.send_message(message.chat.id, "❗ Ты не зарегистрирован. Напиши /start.")
+        return
+
+    achievements_list = get_achievements(user_id)
+    if not achievements_list:
+        bot.send_message(message.chat.id, "🏅 У тебя пока нет достижений. Заработай их, повышая свои оценки!")
+    else:
+        text = "🏅 Твои достижения:\n" + "\n".join([f"✅ {a}" for a in achievements_list])
+        bot.send_message(message.chat.id, text)
+
+print("[INFO] Бот запущен и ждёт команды")
 bot.polling()
