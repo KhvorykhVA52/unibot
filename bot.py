@@ -294,6 +294,9 @@ ID: {uid}
 
     bot.send_message(message.chat.id, report)
 
+
+# главное меню педики йобана)
+
 @bot.message_handler(commands=['menu'])
 def menu(message):
     markup = types.InlineKeyboardMarkup(row_width=2)
@@ -303,10 +306,27 @@ def menu(message):
         types.InlineKeyboardButton("✏️ Добавить", callback_data="add_grade"),
         types.InlineKeyboardButton("❗ Долги", callback_data="set_debts"),
         types.InlineKeyboardButton("📄 Карточка", callback_data="card"),
+        types.InlineKeyboardButton("⏰ Напоминания", callback_data="reminders"),  # Новая кнопка
         types.InlineKeyboardButton("🏛 Университет FAQ", callback_data="university")
     )
     bot.send_message(message.chat.id, "📲 Главное меню:", reply_markup=markup)
 
+# ХЗ ДИПСОН СКАЗАЛ СЮДА ЭТО ВСТАВИТЬ, ИМЕННО ПЕРЕД СЛЕДУЮЩИМ КОЛЛБЭКОМ
+
+@bot.callback_query_handler(func=lambda call: call.data == "reminders")
+def handle_reminders(call):
+    user_id = str(call.message.chat.id)
+    markup = types.InlineKeyboardMarkup()
+    markup.add(
+        types.InlineKeyboardButton("➕ Добавить напоминание", callback_data="add_reminder"),
+        types.InlineKeyboardButton("📋 Мои напоминания", callback_data="list_reminders")
+    )
+    bot.edit_message_text(
+        chat_id=call.message.chat.id,
+        message_id=call.message.message_id,
+        text="⏰ Управление напоминаниями:",
+        reply_markup=markup
+    )
 
 
 @bot.callback_query_handler(func=lambda call: True)
