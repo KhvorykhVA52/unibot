@@ -4,6 +4,8 @@ from telebot import types
 from config import TOKEN
 from database import *
 import sqlite3
+import threading
+import time
 
 init_db()
 
@@ -12,7 +14,7 @@ faculties = {
         "Информационная безопасность компьютерных систем и сетей": ["ИБКС-24-1", "ИБКС-23"],
         "Автоматизированные системы обработки информации и управления": ["АСОиУБ-24-1", "АСОиУБ-23"]
     },
-    "Нефтегазовое дело": {
+    "Нефтегазовые дело": {
         "Автоматизация технологических процессов и производств в нефтяной и газовой промышленности": ["АТП-21", "ЭЭ-22"],
         "Нефтегазовое дело": ["НДБ-24", "НДБ-23"]
     }
@@ -23,25 +25,20 @@ ADMIN_IDS = [
     "564380150", "1025247272", "843344460"
 ]
 
-import threading
-import time
-
 bot = telebot.TeleBot(TOKEN)
-bot.set_my_commands([
-    telebot.types.BotCommand("start", "Начать регистрацию"),
-    telebot.types.BotCommand("menu", "Главное меню"),
-    telebot.types.BotCommand("status", "Успеваемость и баллы"),
-    telebot.types.BotCommand("add_grade", "Добавить или изменить оценку"),
-    telebot.types.BotCommand("set_debts", "Указать количество долгов"),
-    telebot.types.BotCommand("card", "Карточка студента"),
-    telebot.types.BotCommand("grades", "Показать оценки"),
-    telebot.types.BotCommand("university", "Информация об университете"),
-    telebot.types.BotCommand("achievements", "Просмотр своих достижений"),
-    telebot.types.BotCommand("admin", "Список всех студентов (только для админов)")
-])
 
+# Вспомогательные функции
+def add_back_button(markup, back_to):
+    """Добавляет кнопку Назад в указанную клавиатуру"""
+    markup.add(types.InlineKeyboardButton("🔙 Назад", callback_data=back_to))
 
+def send_with_back(message, text, back_to):
+    """Отправляет сообщение с кнопкой Назад"""
+    markup = types.InlineKeyboardMarkup()
+    add_back_button(markup, back_to)
+    bot.send_message(message.chat.id, text, reply_markup=markup)
 
+# Обработчики команд
 @bot.message_handler(commands=['start'])
 def start(message):
     user_id = str(message.chat.id)
@@ -89,13 +86,11 @@ def select_group(message, faculty, specialty):
         bot.send_message(message.chat.id, "❗ Неверная группа. Попробуй снова: /start")
         return
 
-    # Получаем список студентов из базы
     student_names = get_students_by_group(faculty, specialty, group_name)
     if not student_names:
         bot.send_message(message.chat.id, "⚠️ В этой группе пока нет студентов в базе. Обратись к администратору.")
         return
 
-    # Отправляем список ФИО для выбора
     markup = types.ReplyKeyboardMarkup(resize_keyboard=True)
     for name in student_names:
         markup.add(types.KeyboardButton(name))
@@ -111,7 +106,6 @@ def assign_identity(message, faculty, specialty, group_name):
     bot.send_message(message.chat.id, f"""✅ Добро пожаловать, {name}!
 Ты зарегистрирован.""")
 
-
     commands_text = """
 📌 Теперь ты можешь использовать команды:
 
@@ -121,10 +115,36 @@ def assign_identity(message, faculty, specialty, group_name):
 /add_grade — добавить или изменить оценку
 /set_debts — указать количество долгов
 /card — карточка студента
-/university — университет FAQ
 /admin — список всех студентов (только для админов)
+/university — FAQ по университету
+/achievements — посмотреть свои достижения  
+/logout - выйти из аккаунта
+
 """
     bot.send_message(message.chat.id, commands_text)
+
+@bot.message_handler(commands=['menu'])
+def show_main_menu(target):
+    chat_id = target.chat.id if hasattr(target, "chat") else target.message.chat.id
+
+    markup = types.InlineKeyboardMarkup(row_width=2)
+    markup.add(
+        types.InlineKeyboardButton("📊 Успеваемость", callback_data="status"),
+        types.InlineKeyboardButton("📘 Оценки", callback_data="grades"),
+        types.InlineKeyboardButton("✏️ Добавить", callback_data="add_grade"),
+        types.InlineKeyboardButton("❗ Долги", callback_data="set_debts"),
+        types.InlineKeyboardButton("📄 Карточка", callback_data="card"),
+        types.InlineKeyboardButton("⏰ Напоминания", callback_data="reminders"),
+        types.InlineKeyboardButton("🏛 Университет FAQ", callback_data="university")
+    )
+    bot.send_message(chat_id, "📲 Главное меню:", reply_markup=markup)
+
+@bot.callback_query_handler(func=lambda call: call.data == "menu")
+def back_to_menu(call):
+    bot.delete_message(call.message.chat.id, call.message.message_id)
+    show_main_menu(call)
+
+
 
 @bot.message_handler(commands=['status'])
 def status(message):
@@ -142,19 +162,41 @@ def status(message):
     risk = min(100, debts * 25)
     grades_text = "\n".join([f"{subj}: {score} баллов" for subj, score in grades.items()]) or "Нет оценок"
 
+    if avg >= 90:
+        prediction = "Отлично (5)"
+    elif avg >= 75:
+        prediction = "Хорошо (4)"
+    elif avg >= 60:
+        prediction = "Удовлетворительно (3)"
+    else:
+        prediction = "Неуд (2) — риск отчисления высок"
+
+    critical_subjects = [f"❗ {subj}: {score} баллов" for subj, score in grades.items() if score < 60]
+    critical_text = "\n".join(critical_subjects) or "Нет критических предметов"
+
+    goal = 85
+    filled = math.floor(avg / goal * 5)
+    bar = "▰" * filled + "▱" * (5 - filled)
+    progress_line = f"🔄 Прогресс к цели: {bar} {avg} / {goal}"
+
     text = f"""👤 {name}
 🏛 Факультет: {student["faculty"]}
 📘 Специальность: {student["specialty"]}
 🧑‍🎓 Группа: {student["group"]}
 
-📚 Успеваемость:
+📊 Моя Успеваемость
+   ├─ Текущие баллы
 {grades_text}
+   ├─ Прогноз итоговой оценки: {prediction}
+   ├─ Критические предметы:
+{critical_text}
+   └─ {progress_line}
 
 📈 Средний балл: {avg}
 ❗ Долги: {debts}
 🔥 Риск отчисления: {risk}%
 """
-    bot.send_message(message.chat.id, text)
+    send_with_back(message, text, "menu")
 
 @bot.message_handler(commands=['grades'])
 def grades(message):
@@ -171,7 +213,7 @@ def grades(message):
     else:
         grades_text = "Нет оценок"
 
-    bot.send_message(message.chat.id, f"📘 Твои оценки:\n{grades_text}")
+    send_with_back(message, f"📘 Твои оценки:\n{grades_text}", "menu")
 
 @bot.message_handler(commands=['add_grade'])
 def add_grade(message):
@@ -188,8 +230,6 @@ def save_grade(message):
             return
 
         text = message.text.strip()
-
-        # Пример: "Физика, 78. Алгебра, 99. История, 85"
         items = text.split(".")
         updates = {}
 
@@ -208,16 +248,12 @@ def save_grade(message):
         grades.update(updates)
         update_grades(user_id, grades)
 
-        # Формируем ответ
         result = "\n".join([f"{subj}: {score} баллов" for subj, score in updates.items()])
-        bot.send_message(message.chat.id, f"✅ Добавлены/обновлены оценки:\n{result}")
+        send_with_back(message, f"✅ Добавлены/обновлены оценки:\n{result}", "menu")
 
     except Exception as e:
         bot.send_message(message.chat.id, "⚠️ Ошибка! Формат: Физика, 78. Алгебра, 99.")
         print(f"[DEBUG] Ошибка в save_grade: {e}")
-
-
-
 
 @bot.message_handler(commands=['set_debts'])
 def set_debts(message):
@@ -234,7 +270,7 @@ def save_debts(message):
 
         debts = int(message.text.strip())
         update_debts(user_id, debts)
-        bot.send_message(message.chat.id, f"Обновлено: теперь у тебя {debts} долгов.")
+        send_with_back(message, f"Обновлено: теперь у тебя {debts} долгов.", "menu")
     except:
         bot.send_message(message.chat.id, "⚠️ Ошибка! Введи число.")
 
@@ -266,7 +302,7 @@ def card(message):
 ❗ Долги: {debts}
 🔥 Риск отчисления: {risk}%
 """
-    bot.send_message(message.chat.id, text)
+    send_with_back(message, text, "menu")
 
 @bot.message_handler(commands=['admin'])
 def admin_panel(message):
@@ -292,35 +328,36 @@ ID: {uid}
 📈 Средний балл: {avg}
 ❗ Долги: {debts} | 🔥 Риск: {risk}%\n\n"""
 
-    bot.send_message(message.chat.id, report)
+    send_with_back(message, report, "menu")
 
-
-# главное меню педики йобана)
-
-@bot.message_handler(commands=['menu'])
-def menu(message):
-    markup = types.InlineKeyboardMarkup(row_width=2)
-    markup.add(
-        types.InlineKeyboardButton("📊 Успеваемость", callback_data="status"),
-        types.InlineKeyboardButton("📘 Оценки", callback_data="grades"),
-        types.InlineKeyboardButton("✏️ Добавить", callback_data="add_grade"),
-        types.InlineKeyboardButton("❗ Долги", callback_data="set_debts"),
-        types.InlineKeyboardButton("📄 Карточка", callback_data="card"),
-        types.InlineKeyboardButton("⏰ Напоминания", callback_data="reminders"),  # Новая кнопка
-        types.InlineKeyboardButton("🏛 Университет FAQ", callback_data="university")
+@bot.message_handler(commands=['university'])
+def university_info(message):
+    markup = types.InlineKeyboardMarkup(row_width=1)
+    buttons = [
+        types.InlineKeyboardButton("Контакты преподавателей", callback_data="uni_contacts"),
+        types.InlineKeyboardButton("Расписание звонков", callback_data="uni_schedule"),
+        types.InlineKeyboardButton("Адреса корпусов", callback_data="uni_map"),
+        types.InlineKeyboardButton("Правила пересдач", callback_data="uni_retakes"),
+        types.InlineKeyboardButton("Шаблоны заявлений", callback_data="uni_templates")
+    ]
+    markup.add(*buttons)
+    add_back_button(markup, "menu")
+    
+    bot.send_message(
+        message.chat.id,
+        "🏛 Университет FAQ - выберите раздел:",
+        reply_markup=markup
     )
-    bot.send_message(message.chat.id, "📲 Главное меню:", reply_markup=markup)
 
-# ХЗ ДИПСОН СКАЗАЛ СЮДА ЭТО ВСТАВИТЬ, ИМЕННО ПЕРЕД СЛЕДУЮЩИМ КОЛЛБЭКОМ
-
+# Обработчики callback-запросов
 @bot.callback_query_handler(func=lambda call: call.data == "reminders")
 def handle_reminders(call):
-    user_id = str(call.message.chat.id)
     markup = types.InlineKeyboardMarkup()
     markup.add(
         types.InlineKeyboardButton("➕ Добавить напоминание", callback_data="add_reminder"),
         types.InlineKeyboardButton("📋 Мои напоминания", callback_data="list_reminders")
     )
+    add_back_button(markup, "menu")
     bot.edit_message_text(
         chat_id=call.message.chat.id,
         message_id=call.message.message_id,
@@ -328,12 +365,93 @@ def handle_reminders(call):
         reply_markup=markup
     )
 
+def handle_university_buttons(call):
+    try:
+        if call.data == "uni_contacts":
+            text = "📞 Контакты преподавателей:\n\n1. Панченко Наталья Борисовна: +7-922-486-62-05\n2. Заичко Маргарита Васильевна: +7-904-492-50-50"
+            markup = types.InlineKeyboardMarkup()
+            add_back_button(markup, "university")
+            bot.send_message(call.message.chat.id, text, reply_markup=markup)
+
+        elif call.data == "uni_schedule":
+            text = (
+                "🕒 Расписание звонков:\n\n"
+                "1 пара: 08:00 - 09:35\n"
+                "2 пара: 09:45 - 11:20\n"
+                "3 пара: 11:30 - 13:05\n"
+                "4 пара: 13:45 - 15:20\n"
+                "5 пара: 15:30 - 17:05\n"
+                "6 пара: 17:15 - 18:50\n"
+                "7 пара: 19:00 - 20:25\n"
+                "8 пара: 20:35 - 22:00"
+            )
+            markup = types.InlineKeyboardMarkup()
+            add_back_button(markup, "university")
+            bot.send_message(call.message.chat.id, text, reply_markup=markup)
+
+        elif call.data == "uni_map":
+            buildings = get_all_buildings()
+            if buildings:
+                markup = types.InlineKeyboardMarkup(row_width=1)
+                for i, (name, _) in enumerate(buildings):
+                    markup.add(types.InlineKeyboardButton(name, callback_data=f"bld_{i}"))
+                add_back_button(markup, "university")
+                bot.send_message(call.message.chat.id, "🏛 Выберите корпус:", reply_markup=markup)
+            else:
+                markup = types.InlineKeyboardMarkup()
+                add_back_button(markup, "university")
+                bot.send_message(call.message.chat.id, "⚠️ Список корпусов пока не заполнен.", reply_markup=markup)
+
+        elif call.data == "uni_retakes":
+            text = (
+                "📝 Правила пересдач:\n\n"
+                "1. Пересдача проводится 1 раз за семестр\n"
+                "2. Необходимо договориться с преподавателем о дате, времени, месте\n"
+                "3. Максимальная оценка при пересдаче — 5"
+            )
+            markup = types.InlineKeyboardMarkup()
+            add_back_button(markup, "university")
+            bot.send_message(call.message.chat.id, text, reply_markup=markup)
+
+        elif call.data == "uni_templates":
+            try:
+                with open('zayavlenie.docx', 'rb') as doc:
+                    bot.send_document(call.message.chat.id, doc, caption="📄 Вот держи!")
+                markup = types.InlineKeyboardMarkup()
+                add_back_button(markup, "university")
+                bot.send_message(call.message.chat.id, "⬅️ Вернуться в раздел FAQ:", reply_markup=markup)
+            except Exception as e:
+                print(f"Ошибка при отправке документа: {e}")
+                markup = types.InlineKeyboardMarkup()
+                add_back_button(markup, "university")
+                bot.send_message(call.message.chat.id, "⚠️ Файл не найден", reply_markup=markup)
+
+        elif call.data.startswith("bld_"):
+            index = int(call.data.split("_")[1])
+            buildings = get_all_buildings()
+            if 0 <= index < len(buildings):
+                name, address = buildings[index]
+                text = f"🏛 <b>{name}</b>\n📍 {address}"
+                markup = types.InlineKeyboardMarkup()
+                add_back_button(markup, "uni_map")
+                bot.send_message(call.message.chat.id, text, parse_mode="HTML", reply_markup=markup)
+            else:
+                markup = types.InlineKeyboardMarkup()
+                add_back_button(markup, "uni_map")
+                bot.send_message(call.message.chat.id, "⚠️ Корпус не найден.", reply_markup=markup)
+
+    except Exception as e:
+        print(f"[ERROR] В обработчике university_buttons: {e}")
+        bot.send_message(call.message.chat.id, "⚠️ Ошибка сервера")
 
 @bot.callback_query_handler(func=lambda call: True)
 def handle_all_callbacks(call):
     try:
-        print(f"DEBUG: Нажата кнопка: {call.data}")  # Для отладки
-    
+        try:
+            bot.answer_callback_query(call.id)
+        except Exception as e:
+            print(f"[ERROR] Не удалось отправить answer_callback_query: {e}")
+
         if call.data == "status":
             status(call.message)
         elif call.data == "grades":
@@ -344,19 +462,47 @@ def handle_all_callbacks(call):
             set_debts(call.message)
         elif call.data == "card":
             card(call.message)
-        elif call.data == "university":  # Обработка кнопки из главного меню
+        elif call.data == "reminders":
+            handle_reminders(call)
+        elif call.data == "university":
             university_info(call.message)
-        elif call.data.startswith('uni_'):  # Обработка кнопок университета
+        elif call.data.startswith("bld_") or call.data.startswith("uni_"):
             handle_university_buttons(call)
-            
-        bot.answer_callback_query(call.id)  # Подтверждение нажатия
-            
+        elif call.data == "menu":
+            show_main_menu(call.message.chat.id)
+
     except Exception as e:
-        print(f"Ошибка: {e}")
+        print(f"[ERROR] в handle_all_callbacks: {e}")
         bot.answer_callback_query(call.id, "⚠️ Ошибка. Попробуйте снова.")
+        
+@bot.message_handler(commands=['logout'])
+def logout(message):
+    user_id = str(message.chat.id)
+    conn = connect_db()
+    cursor = conn.cursor()
+    cursor.execute('UPDATE students SET id = NULL, active = 1 WHERE id = ?', (user_id,))
+    conn.commit()
+    conn.close()
+    bot.send_message(message.chat.id, "🗑 Ты вышел. Чтобы начать заново, напиши /start.")
 
 
 
+@bot.message_handler(commands=['achievements'])
+def achievements(message):
+    user_id = str(message.chat.id)
+    student = get_student(user_id)
+    if not student:
+        bot.send_message(message.chat.id, "❗ Ты не зарегистрирован. Напиши /start.")
+        return
+
+    achievements_list = get_achievements(user_id)
+    if not achievements_list:
+        bot.send_message(message.chat.id, "🏅 У тебя пока нет достижений. Заработай их, повышая свои оценки!")
+    else:
+        text = "🏅 Твои достижения:\n" + "\n".join([f"✅ {a}" for a in achievements_list])
+        send_with_back(message, text, "menu")
+
+# Фоновые задачи
 def check_for_grade_updates():
     while True:
         try:
@@ -379,15 +525,10 @@ def check_for_grade_updates():
                     if old_score is not None and new_score != old_score:
                         updates.append(f"{subject}: было {old_score} → стало {new_score}")
 
-                print(f"[DEBUG] {student['name']} — сравниваем оценки:")
-                print(f"grades      : {current_grades}")
-                print(f"last_grades : {last_grades}")
-
                 if updates:
                     message = "📢 Обновление оценок:\n" + "\n".join(updates)
                     try:
                         bot.send_message(user_id, message)
-                        print(f"[OK] Уведомление отправлено студенту ID {user_id}.")
                     except Exception as e:
                         print(f"[ERROR] Не удалось отправить сообщение студенту ID {user_id}: {e}")
                     update_last_grades(user_id, current_grades)
@@ -398,163 +539,6 @@ def check_for_grade_updates():
         time.sleep(60)
 
 threading.Thread(target=check_for_grade_updates, daemon=True).start()
-
-@bot.message_handler(commands=['status'])
-def status(message):
-    user_id = str(message.chat.id)
-    print(f"[DEBUG] Обработчик /status: user_id = {user_id}")
-
-    student = get_student(user_id)
-    if not student:
-        bot.send_message(message.chat.id, "❗ Ты не зарегистрирован. Напиши /start.")
-        return
-
-    name = student["name"]
-    grades = student["grades"]
-    debts = student["debts"]
-    avg = round(sum(grades.values()) / len(grades), 2) if grades else 0.0
-    risk = min(100, debts * 25)
-    grades_text = "\n".join([f"{subj}: {score} баллов" for subj, score in grades.items()]) or "Нет оценок"
-
-    # прогноз оценки
-    if avg >= 90:
-        prediction = "Отлично (5)"
-    elif avg >= 75:
-        prediction = "Хорошо (4)"
-    elif avg >= 60:
-        prediction = "Удовлетворительно (3)"
-    else:
-        prediction = "Неуд (2) — риск отчисления высок"
-
-    # критические предметы
-    critical_subjects = [f"❗ {subj}: {score} баллов" for subj, score in grades.items() if score < 60]
-    critical_text = "\n".join(critical_subjects) or "Нет критических предметов"
-
-    # прогресс-бар (цель — 85 баллов)
-    goal = 85
-    filled = math.floor(avg / goal * 5)
-    bar = "▰" * filled + "▱" * (5 - filled)
-    progress_line = f"🔄 Прогресс к цели: {bar} {avg} / {goal}"
-
-    text = f"""👤 {name}
-🏛 Факультет: {student["faculty"]}
-📘 Специальность: {student["specialty"]}
-🧑‍🎓 Группа: {student["group"]}
-
-📊 Моя Успеваемость
-   ├─ Текущие баллы
-{grades_text}
-   ├─ Прогноз итоговой оценки: {prediction}
-   ├─ Критические предметы:
-{critical_text}
-   └─ {progress_line}
-
-📈 Средний балл: {avg}
-❗ Долги: {debts}
-🔥 Риск отчисления: {risk}%
-"""
-    bot.send_message(message.chat.id, text)
-
-
-
-@bot.message_handler(commands=['university'])
-def university_info(message):
-    markup = types.InlineKeyboardMarkup(row_width=1)
-    buttons = [
-        types.InlineKeyboardButton("Контакты преподавателей", callback_data="uni_contacts"),
-        types.InlineKeyboardButton("Расписание звонков", callback_data="uni_schedule"),
-        types.InlineKeyboardButton("Адреса корпусов", callback_data="uni_map"),
-        types.InlineKeyboardButton("Правила пересдач", callback_data="uni_retakes"),
-        types.InlineKeyboardButton("Шаблоны заявлений", callback_data="uni_templates")
-    ]
-    markup.add(*buttons)
-    
-    bot.send_message(
-        message.chat.id,
-        "🏛 Университет FAQ - выберите раздел:",
-        reply_markup=markup
-    )
-
-
-def handle_university_buttons(call):
-    try:
-        # Удаляем клавиатуру после нажатия
-        bot.edit_message_reply_markup(
-            chat_id=call.message.chat.id,
-            message_id=call.message.message_id,
-            reply_markup=None
-        )
-        
-        if call.data == "uni_contacts":
-            text = "📞 Контакты преподавателей:\n\n1. Панченко Наталья Борисовна: +7-922-486-62-05\n2. Заичко Маргарита Васильевна: +7-904-492-50-50"
-        
-        elif call.data == "uni_schedule":
-            text = "🕒 Расписание звонков:\n\n1 пара: 08:00 - 09:35\n2 пара: 09:45 - 11:20\n3 пара: 11:30 - 13:05\n4 пара: 13:45 - 15:20\n5 пара: 15:30 - 17:05\n6 пара: 17:15 - 18:50\n7 пара: 19:00 - 20:25\n8 пара: 20:35 - 22:00"
-        
-        elif call.data == "uni_map":
-            text = """🏛 Адреса корпусов:
-
-Корпус №1 (Учебно-лабораторный): г. Тюмень, ул. Володарского, 38
-Корпус №1 А (Учебно-лабораторный): г. Тюмень, ул. Республики, 49/3
-Корпус №1 Б (Учебный): г. Тюмень, ул. Республики, 47
-Корпус №2 (Учебно-лабораторный): г. Тюмень, ул. Мельникайте, 72
-Корпус №3 (Учебно-лабораторный): г. Тюмень, ул. 50 лет Октября, 38
-Корпус №4 (Учебно-лабораторный): г. Тюмень, ул. Володарского, 56
-Корпус №5 (Учебный): г. Тюмень, ул. Мельникайте, 72, корпус 1
-Корпус №6 (Учебно-лабораторный): г. Тюмень, ул. Киевская, 52
-Корпус №7 (Учебный): г. Тюмень, ул. Мельникайте, 70
-Корпус №8 (Учебно-лабораторный): г. Тюмень, ул. Луначарского, 2
-Корпус №8/1 (Инженерно-лабораторный): г. Тюмень, ул. Луначарского, 2, корпус 1
-Корпус №8/2 (Учебный): г. Тюмень, ул. Луначарского, 2, корпус 2
-Корпус №8/3 (Учебный): г. Тюмень, ул. Луначарского, 2, корпус 3
-Корпус №8/4 (Спортивный зал): г. Тюмень, ул. Луначарского, 2, корпус 4
-Корпус №8/5 (СК "Зодчий"): г. Тюмень, ул. Луначарского, 2, корпус 5
-Корпус №8/6 (Учебно-лабораторный): г. Тюмень, ул. Луначарского, 2, корпус 6
-Корпус №9 (Учебно-лабораторный): г. Тюмень, ул. Луначарского, 4
-Корпус №10 (Учебный): г. Тюмень, ул. Энергетиков, 44, корпус 1
-Корпус №11 (Учебный): г. Тюмень, ул. Энергетиков, 44
-Корпус №12 (Учебный): г. Тюмень, ул. Бабарынка, 20 б
-Корпус №13 (Учебный): г. Тюмень, ул. Холодильная, 85
-Корпус №14 (Учебный): г. Тюмень, ул. Холодильная, 85, строение 1
-Корпус №15 (Учебный): г. Тюмень, ул. 50 лет ВЛКСМ, 45 а, стр. 1
-Корпус №16 (Учебный): г. Тюмень, ул. 50 лет Октября, 62
-Корпус №17 (Учебный): г. Тюмень, ул. Киевская, 78, корпус 1
-Корпус №18 (Учебные мастерские): г. Тюмень, ул. Мало-Загородная, 17"""
-        elif call.data == "uni_retakes":
-            text = "📝 Правила пересдач:\n\n1. Пересдача проводится 1 раз за семестр\n2. Необходимо договориться с преподавателем о дате, времени, месте (возможно вам придётся получить дополнительный задания)\n3. Максимальная оценка при пересдаче - 5"
-        
-        elif call.data == "uni_templates":
-            text = "📄 Шаблоны заявлений:\n\nДержите файл!"
-            try:
-                with open('Формы представлений для подачи заявлений на повышенную стипендию.docx', 'rb') as doc:
-                    bot.send_document(call.message.chat.id, doc, caption="Форма заявления")
-            except Exception as e:
-                print(f"Ошибка: {e}")
-                text = "⚠️ Файл не найден"
-        
-        bot.send_message(call.message.chat.id, text)
-        
-    except Exception as e:
-        print(f"Ошибка: {e}")
-        bot.send_message(call.message.chat.id, "⚠️ Ошибка сервера")
-
-
-
-
-@bot.message_handler(commands=['achievements'])
-def achievements(message):
-    user_id = str(message.chat.id)
-    student = get_student(user_id)
-    if not student:
-        bot.send_message(message.chat.id, "❗ Ты не зарегистрирован. Напиши /start.")
-        return
-
-    achievements_list = get_achievements(user_id)
-    if not achievements_list:
-        bot.send_message(message.chat.id, "🏅 У тебя пока нет достижений. Заработай их, повышая свои оценки!")
-    else:
-        text = "🏅 Твои достижения:\n" + "\n".join([f"✅ {a}" for a in achievements_list])
-        bot.send_message(message.chat.id, text)
 
 print("[INFO] Бот запущен и ждёт команды")
 bot.polling()

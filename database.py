@@ -31,6 +31,7 @@ def init_db():
     ''')
     conn.commit()
     conn.close()
+    init_buildings_table()
 
 # Добавление нового студента
 def add_student(user_id, name, faculty, specialty, group_name):
@@ -171,6 +172,29 @@ def add_achievement(user_id, title):
         cursor.execute('INSERT INTO achievements (user_id, title) VALUES (?, ?)', (user_id, title))
         conn.commit()
     conn.close()
+
+def init_buildings_table():
+    conn = connect_db()
+    cursor = conn.cursor()
+    cursor.execute('''
+        CREATE TABLE IF NOT EXISTS buildings (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            name TEXT,
+            address TEXT
+        )
+    ''')
+    conn.commit()
+    conn.close()
+
+def get_all_buildings():
+    conn = connect_db()
+    cursor = conn.cursor()
+    cursor.execute('SELECT name, address FROM buildings ORDER BY id')
+    buildings = cursor.fetchall()
+    conn.close()
+    return buildings
+
+
 
 # Получить список достижений
 def get_achievements(user_id):
