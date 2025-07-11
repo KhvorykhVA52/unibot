@@ -1,5 +1,6 @@
 import telebot
 import math
+import requests
 from telebot import types
 from config import TOKEN
 from database import *
@@ -124,8 +125,16 @@ def assign_identity(message, faculty, specialty, group_name):
     bot.send_message(message.chat.id, commands_text)
 
 @bot.message_handler(commands=['menu'])
-def show_main_menu(target):
-    chat_id = target.chat.id if hasattr(target, "chat") else target.message.chat.id
+def show_main_menu(chat_id_or_message):
+    """Показывает главное меню"""
+    if isinstance(chat_id_or_message, types.CallbackQuery):
+        chat_id = chat_id_or_message.message.chat.id
+        try:
+            bot.delete_message(chat_id, chat_id_or_message.message.message_id)
+        except:
+            pass
+    else:
+        chat_id = chat_id_or_message.chat.id if hasattr(chat_id_or_message, 'chat') else chat_id_or_message
 
     markup = types.InlineKeyboardMarkup(row_width=2)
     markup.add(
@@ -135,16 +144,14 @@ def show_main_menu(target):
         types.InlineKeyboardButton("❗ Долги", callback_data="set_debts"),
         types.InlineKeyboardButton("📄 Карточка", callback_data="card"),
         types.InlineKeyboardButton("⏰ Напоминания", callback_data="reminders"),
+        types.InlineKeyboardButton("💪 Мотивация", callback_data="motivation"),  
         types.InlineKeyboardButton("🏛 Университет FAQ", callback_data="university")
     )
     bot.send_message(chat_id, "📲 Главное меню:", reply_markup=markup)
 
 @bot.callback_query_handler(func=lambda call: call.data == "menu")
 def back_to_menu(call):
-    bot.delete_message(call.message.chat.id, call.message.message_id)
     show_main_menu(call)
-
-
 
 @bot.message_handler(commands=['status'])
 def status(message):
@@ -444,6 +451,66 @@ def handle_university_buttons(call):
         print(f"[ERROR] В обработчике university_buttons: {e}")
         bot.send_message(call.message.chat.id, "⚠️ Ошибка сервера")
 
+@bot.message_handler(commands=['quote'])
+def send_quote(message):
+    try:
+        url = "https://api.forismatic.com/api/1.0/?method=getQuote&format=json&lang=ru"
+        response = requests.get(url, timeout=5)
+        data = response.json()
+
+        quote = data.get("quoteText", "Цитата недоступна.").strip()
+        author = data.get("quoteAuthor", "Неизвестный автор").strip()
+
+        bot.send_message(message.chat.id, f"💬 <b>{quote}</b>\n— <i>{author}</i>", parse_mode="HTML")
+    except Exception as e:
+        bot.send_message(message.chat.id, "⚠️ Ошибка при получении цитаты.")
+        print(f"[ERROR] Цитата: {e}")
+
+# --- ЦИТАТА ---
+def send_quote(message):
+    try:
+        response = requests.get("https://api.quotable.io/random", timeout=10, verify=False)
+        if response.status_code == 200:
+            data = response.json()
+            quote = data['content']
+            author = data['author']
+            text = f"💬 {quote}\n— {author}"
+        else:
+            text = "⚠️ Не удалось получить цитату. Попробуй позже."
+        send_with_back(message, text, "motivation")
+    except Exception as e:
+        print(f"[ERROR] Цитата: {e}")
+        bot.send_message(message.chat.id, "⚠️ Ошибка при получении цитаты.")
+
+def start_pomodoro(message):
+    try:
+        bot.send_message(message.chat.id, "⏱ Pomodoro запущен: 25 минут фокусировки!\nЯ напомню, когда время истечёт.")
+        threading.Timer(1500, lambda: bot.send_message(message.chat.id, "🔔 Время вышло! Сделай 5-минутный перерыв.")).start()
+    except Exception as e:
+        print(f"[ERROR] Pomodoro: {e}")
+        bot.send_message(message.chat.id, "⚠️ Не удалось запустить таймер.")
+
+def handle_motivation(call):
+    try:
+        text = "💪 *Мотивация*\n\nВыберите действие:"
+        markup = types.InlineKeyboardMarkup(row_width=1)
+        markup.add(
+            types.InlineKeyboardButton("🍅 Pomodoro-таймер", callback_data="pomodoro"),
+            types.InlineKeyboardButton("🏅 Ачивки", callback_data="achievements"),
+            types.InlineKeyboardButton("💬 Цитата дня", callback_data="quote"),
+        )
+        markup.add(types.InlineKeyboardButton("🔙 Назад", callback_data="menu"))
+        bot.edit_message_text(
+            chat_id=call.message.chat.id,
+            message_id=call.message.message_id,
+            text=text,
+            reply_markup=markup,
+            parse_mode="Markdown"
+        )
+    except Exception as e:
+        print(f"[ERROR] в handle_motivation: {e}")
+        bot.send_message(call.message.chat.id, "⚠️ Ошибка при открытии раздела мотивации.")
+
 @bot.callback_query_handler(func=lambda call: True)
 def handle_all_callbacks(call):
     try:
@@ -469,12 +536,23 @@ def handle_all_callbacks(call):
         elif call.data.startswith("bld_") or call.data.startswith("uni_"):
             handle_university_buttons(call)
         elif call.data == "menu":
-            show_main_menu(call.message.chat.id)
+            show_main_menu(call)
+        elif call.data == "motivation":
+            handle_motivation(call)
+        elif call.data == "quote":
+            send_quote(call.message)
+        elif call.data == "pomodoro":
+            start_pomodoro(call.message)
+        elif call.data == "quote":
+            send_quote(call.message)
+        elif call.data == "achievements":
+            achievements(call.message)
 
+            
     except Exception as e:
         print(f"[ERROR] в handle_all_callbacks: {e}")
         bot.answer_callback_query(call.id, "⚠️ Ошибка. Попробуйте снова.")
-        
+
 @bot.message_handler(commands=['logout'])
 def logout(message):
     user_id = str(message.chat.id)
@@ -485,22 +563,21 @@ def logout(message):
     conn.close()
     bot.send_message(message.chat.id, "🗑 Ты вышел. Чтобы начать заново, напиши /start.")
 
-
-
 @bot.message_handler(commands=['achievements'])
 def achievements(message):
     user_id = str(message.chat.id)
     student = get_student(user_id)
     if not student:
-        bot.send_message(message.chat.id, "❗ Ты не зарегистрирован. Напиши /start.")
+        bot.send_message(message.chat.id, "❗ Ты не зарегистрирован.")
         return
 
-    achievements_list = get_achievements(user_id)
-    if not achievements_list:
-        bot.send_message(message.chat.id, "🏅 У тебя пока нет достижений. Заработай их, повышая свои оценки!")
+    ach_list = get_achievements(user_id)
+    if not ach_list:
+        send_with_back(message, "🏅 У тебя пока нет достижений. Подтяни оценки — и будут!", "motivation")
     else:
-        text = "🏅 Твои достижения:\n" + "\n".join([f"✅ {a}" for a in achievements_list])
-        send_with_back(message, text, "menu")
+        text = "🏅 Твои достижения:\n" + "\n".join([f"✅ {a}" for a in ach_list])
+        send_with_back(message, text, "motivation")
+
 
 # Фоновые задачи
 def check_for_grade_updates():
